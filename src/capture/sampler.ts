@@ -296,6 +296,87 @@ export function measureHair(img: ImageBuffer, geo: FaceGeometry): RegionStats {
 }
 
 // ---------------------------------------------------------------------------
+// White-paper reference detection (plan P1.5)
+// ---------------------------------------------------------------------------
+
+export type WhiteReferenceDetection = {
+  /** Mean colour of the accepted neutral pixels; reflects the scene illuminant. */
+  rgb: RGB;
+  /** Accepted sample count (grid-sampled, not full resolution). */
+  n: number;
+  /** Bounding box of the patch in normalised coordinates, for UI reporting. */
+  rect: { x: number; y: number; w: number; h: number };
+};
+
+/**
+ * Find a bright, near-neutral surface outside the face box to use as a white reference.
+ *
+ * Heuristic by nature: under a strongly cast illuminant a white surface is not white in sRGB,
+ * so the neutrality bounds are loose (channel spread <= 45, chroma <= 25), and a manually marked
+ * `whiteReferenceRect` always takes precedence in `analyseBuffer`. Blown-out pixels (any channel
+ * >= 252) are excluded because a clipped patch carries no chromaticity information, matching the
+ * gate's own clipping rule. The face box (plus margin) is excluded so sclera and specular
+ * highlights cannot masquerade as paper.
+ */
+export function detectWhiteReference(
+  img: ImageBuffer,
+  faceBox: { x: number; y: number; w: number; h: number },
+  opts: { minSamples?: number; margin?: number } = {}
+): WhiteReferenceDetection | null {
+  const minSamples = opts.minSamples ?? 64;
+  const margin = opts.margin ?? 0.03;
+  const step = Math.max(1, Math.floor(Math.min(img.width, img.height) / 160));
+
+  const ex0 = (faceBox.x - margin) * img.width;
+  const ex1 = (faceBox.x + faceBox.w + margin) * img.width;
+  const ey0 = (faceBox.y - margin) * img.height;
+  const ey1 = (faceBox.y + faceBox.h + margin) * img.height;
+
+  let n = 0;
+  let sr = 0;
+  let sg = 0;
+  let sb = 0;
+  let minX = img.width;
+  let minY = img.height;
+  let maxX = 0;
+  let maxY = 0;
+
+  for (let y = 0; y < img.height; y += step) {
+    for (let x = 0; x < img.width; x += step) {
+      if (x > ex0 && x < ex1 && y > ey0 && y < ey1) continue;
+      const rgb = px(img, x, y);
+      const hi = Math.max(rgb.r, rgb.g, rgb.b);
+      const lo = Math.min(rgb.r, rgb.g, rgb.b);
+      if (hi >= 252) continue; // clipped: no chromaticity left
+      if (lo < 150) continue; // not bright
+      if (hi - lo > 45) continue; // too saturated to be white paper under normal light
+      const lab = sRGBToLab(rgb);
+      if (lab.L < 78) continue;
+      if (Math.hypot(lab.a, lab.b) > 25) continue;
+      n++;
+      sr += rgb.r;
+      sg += rgb.g;
+      sb += rgb.b;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (n < minSamples) return null;
+  return {
+    rgb: { r: sr / n, g: sg / n, b: sb / n },
+    n,
+    rect: {
+      x: minX / img.width,
+      y: minY / img.height,
+      w: (maxX + step - minX) / img.width,
+      h: (maxY + step - minY) / img.height,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Gate metrics, computed from pixels
 // ---------------------------------------------------------------------------
 

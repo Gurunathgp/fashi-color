@@ -82,3 +82,18 @@ export async function loadCalibration(): Promise<StoredCalibration> {
 export async function clearCalibration(): Promise<void> {
   await AsyncStorage.removeItem(CALIBRATION_KEY);
 }
+
+// ---------------------------------------------------------------------------
+// Consent (P1.11: explicit opt-in + retention control)
+// ---------------------------------------------------------------------------
+
+const CONSENT_KEY = "fashi.consent.v1";
+
+/** True once the user has agreed to on-device measurement. Stored locally only. */
+export async function loadConsent(): Promise<boolean> {
+  return (await AsyncStorage.getItem(CONSENT_KEY)) === "agreed";
+}
+
+export async function saveConsent(): Promise<void> {
+  await AsyncStorage.setItem(CONSENT_KEY, "agreed");
+}

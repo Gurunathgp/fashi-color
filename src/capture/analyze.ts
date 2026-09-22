@@ -27,6 +27,7 @@ import {
   computeGateMetrics,
   regionRects,
   sampleRegion,
+  detectWhiteReference,
   type FaceGeometry,
   type ImageBuffer,
   type SkinMeasurement,
@@ -175,6 +176,11 @@ export function analyseBuffer(img: ImageBuffer, opts: AnalysisOptions): Analysis
       { skipSkinGate: true }
     );
     if (patch.n > 0) estimates.push(fromNeutralPatch([patch.rgb], "white-reference", 0.8));
+  } else {
+    // No manually marked paper: look for a bright neutral surface outside the face
+    // (plan P1.5 — under the P0.3 verdict a white reference is near-mandatory).
+    const auto = detectWhiteReference(img, geometry.box);
+    if (auto) estimates.push(fromNeutralPatch([auto.rgb], "white-reference-auto", 0.7));
   }
   if (Number.isFinite(measurement.skin.L)) {
     // Population prior: expected neutral-warm skin a*/b* at this lightness.
@@ -198,7 +204,15 @@ export function analyseBuffer(img: ImageBuffer, opts: AnalysisOptions): Analysis
   // --- correct to D65 ---------------------------------------------------
   const toD65 = (lab: Lab): Lab =>
     Number.isFinite(lab.L) ? xyzToLab(adaptXYZ(labToXYZ(lab), illuminant.white, D65_WHITE)) : lab;
-  const skinD65 = toD65(measurement.skin);
+  // Plan §5: cheek↔neck ΔE00 > 6 → makeup detected → neck-only sampling.
+  // The gate reports neckOnly, but reporting alone is not enough — the measurement
+  // itself must drop the contaminated jaw/forehead sites.
+  const neckRegion = measurement.regions.find((x) => x.region === "neck");
+  const makeupDetected =
+    Number.isFinite(measurement.cheekNeckDE00) && measurement.cheekNeckDE00 > 6;
+  const neckOnly = makeupDetected && !!neckRegion && neckRegion.n > 0 && Number.isFinite(neckRegion.lab.L);
+  const skinMeasured = neckOnly && neckRegion ? neckRegion.lab : measurement.skin;
+  const skinD65 = toD65(skinMeasured);
   const hairD65 = toD65(hair.lab);
 
   // --- gate -------------------------------------------------------------
@@ -222,7 +236,12 @@ export function analyseBuffer(img: ImageBuffer, opts: AnalysisOptions): Analysis
     { skin: skinD65, hair: hairD65, naturalHair: opts.naturalHair ?? true },
     opts.trend
   );
-  const confidence = axisConfidence(axes, opts.trend, measurement.regionSpreadDE00);
+  const confidence = axisConfidence(
+    axes,
+    opts.trend,
+    measurement.regionSpreadDE00,
+    illuminant.reliability
+  );
   const label = deriveLabel(axes, opts.trend);
   const palette = paletteFor(axes, skinD65, opts.trend);
   const swatches = sampleSwatches(palette);

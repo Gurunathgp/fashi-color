@@ -22,7 +22,10 @@ import {
   loadCalibration,
   saveProfile,
   loadProfile,
+  clearProfile,
   clearCalibration,
+  loadConsent,
+  saveConsent,
 } from "./src/storage/profile";
 
 type Screen = "home" | "gate" | "result" | "drape";
@@ -36,6 +39,10 @@ export default function App() {
   const [answers, setAnswers] = useState<{ axis: "W" | "D" | "C"; sign: 1 | -1 }[]>([]);
   const [quizIndex, setQuizIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // null = still loading from device storage.
+  const [consent, setConsent] = useState<boolean | null>(null);
+  // Plan §10 risk "dyed hair": asked before the first measurement, never assumed.
+  const [naturalHair, setNaturalHair] = useState<boolean | null>(null);
 
   // Refit the trend from any calibration samples already on the device.
   const refitTrend = useCallback(async () => {
@@ -47,7 +54,38 @@ export default function App() {
   useEffect(() => {
     void refitTrend();
     void loadProfile();
+    void loadConsent().then(setConsent);
   }, [refitTrend]);
+
+  // Picker cache lives on disk (OS cache dir) even though the engine only measures
+  // in memory. Delete the previous cache file before each new capture so no photo
+  // accumulates — only derived numbers are persisted via saveProfile().
+  const deleteCacheFile = useCallback(async (uri: string | null) => {
+    if (!uri || uri.startsWith("data:")) return;
+    try {
+      await FileSystem.deleteAsync(uri, { idempotent: true });
+    } catch {
+      // Best-effort: cache cleanup must never block analysis.
+    }
+  }, []);
+
+  /**
+   * Dyed or coloured hair invalidates the clarity hair term (plan §10), so the answer is
+   * required before any capture. Blocking, not defaulted: a silent `true` would quietly
+   * mis-measure the burgundy/brown case the plan explicitly calls out for this market.
+   */
+  const requireHairAnswer = useCallback(() => {
+    if (naturalHair !== null) return true;
+    Alert.alert(
+      "Is this your natural hair colour?",
+      "Dyed or coloured hair changes the clarity reading, so we ask before measuring. Tap your answer, then start the capture again.",
+      [
+        { text: "It's natural", onPress: () => setNaturalHair(true) },
+        { text: "Dyed / coloured", onPress: () => setNaturalHair(false) },
+      ]
+    );
+    return false;
+  }, [naturalHair]);
 
   const analyse = useCallback(
     async (uri: string) => {
@@ -56,7 +94,8 @@ export default function App() {
       try {
         const base64 = await FileSystem.readAsStringAsync(uri, { encoding: "base64" });
         const bytes = new Uint8Array(Buffer.from(base64, "base64"));
-        const r = analyseJpeg(bytes, { trend });
+        const r = analyseJpeg(bytes, { trend, naturalHair: naturalHair ?? true });
+        // Free the JPEG bytes promptly; result holds numbers only.
         setResult(r);
         setAnswers([]);
         setQuizIndex(0);
@@ -67,10 +106,11 @@ export default function App() {
         setBusy(false);
       }
     },
-    [trend]
+    [trend, naturalHair]
   );
 
   const pickPhoto = useCallback(async () => {
+    if (!requireHairAnswer()) return;
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
       Alert.alert("Photo access needed", "Fashi reads the photo on-device and never uploads it.");
@@ -78,11 +118,13 @@ export default function App() {
     }
     const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 1 });
     if (res.canceled || !res.assets?.[0]) return;
+    await deleteCacheFile(imageUri);
     setImageUri(res.assets[0].uri);
     await analyse(res.assets[0].uri);
-  }, [analyse]);
+  }, [analyse, deleteCacheFile, imageUri, requireHairAnswer]);
 
   const takePhoto = useCallback(async () => {
+    if (!requireHairAnswer()) return;
     const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (!perm.granted) {
       Alert.alert("Camera access needed", "Fashi reads the frame on-device and never uploads it.");
@@ -90,13 +132,19 @@ export default function App() {
     }
     const res = await ImagePicker.launchCameraAsync({ quality: 1 });
     if (res.canceled || !res.assets?.[0]) return;
+    await deleteCacheFile(imageUri);
     setImageUri(res.assets[0].uri);
     await analyse(res.assets[0].uri);
-  }, [analyse]);
+  }, [analyse, deleteCacheFile, imageUri, requireHairAnswer]);
 
   const quiz: DrapePair[] = useMemo(() => {
     if (!result) return [];
-    const conf = axisConfidence(result.axes, trend, result.measurement.regionSpreadDE00);
+    const conf = axisConfidence(
+      result.axes,
+      trend,
+      result.measurement.regionSpreadDE00,
+      result.illuminant.reliability
+    );
     return drapeQuiz(result.axes, trend, conf.weakest);
   }, [result, trend]);
 
@@ -133,11 +181,53 @@ export default function App() {
       contrast: r.contrast,
       captureCct: r.illuminant.cct,
       illuminantReliability: r.illuminant.reliability,
-      naturalHair: true,
+      naturalHair: naturalHair ?? true,
       quizAnswers: answers,
     });
-    Alert.alert("Saved on device", "Only the numbers were stored. No photo was written to disk.");
-  }, [adjustedResult, answers]);
+    Alert.alert(
+      "Saved on device",
+      "Only the numbers were stored (axes, Lab, contrast, CCT). Picker cache is deleted; no photo is kept."
+    );
+  }, [adjustedResult, answers, naturalHair]);
+
+  // First-run consent (P1.11): explicit opt-in before any capture.
+  if (consent === null) {
+    return <View style={styles.root} />;
+  }
+  if (!consent) {
+    return (
+      <View style={styles.root}>
+        <StatusBar style="dark" />
+        <ScrollView contentContainerStyle={styles.home}>
+          <Text style={styles.h1}>Before you begin</Text>
+          <Text style={styles.p}>
+            Fashi analyses your colouring entirely on this device. Nothing is uploaded, ever.
+          </Text>
+          <Text style={styles.consentBullet}>
+            • Your photo is decoded in memory and its cache file is deleted right after measuring —
+            no photo is kept.
+          </Text>
+          <Text style={styles.consentBullet}>
+            • Only numbers are stored: axis scores, Lab values and calibration samples.
+          </Text>
+          <Text style={styles.consentBullet}>
+            • You can delete everything at any time with “Delete all my data” on the home screen.
+          </Text>
+          <Text style={styles.consentBullet}>
+            • Consent and data stay on this phone; uninstalling the app removes them.
+          </Text>
+          <Pressable
+            style={styles.primary}
+            onPress={() => {
+              void saveConsent().then(() => setConsent(true));
+            }}
+          >
+            <Text style={styles.primaryText}>Agree and continue</Text>
+          </Pressable>
+        </ScrollView>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.root}>
@@ -148,9 +238,44 @@ export default function App() {
           <Text style={styles.h1}>Fashi</Text>
           <Text style={styles.h2}>Personal colour analysis · India MVP</Text>
           <Text style={styles.p}>
-            Runs entirely on this device. The photo is decoded in memory, measured, and discarded —
-            nothing is uploaded and no image is written to storage.
+            Runs entirely on this device. By taking or choosing a photo you consent to on-device
+            measurement — nothing is uploaded. The photo is decoded in memory and its picker cache
+            is deleted; only numbers (axes, Lab, contrast) are ever stored.
           </Text>
+          <Text style={styles.p}>
+            Best light: face a window in daylight, no overhead lamp, white or grey top. Holding a
+            sheet of white paper beside your neck inserts a white reference that sharply improves
+            accuracy (P0.3 verdict pending — synthetic data says drape-only without it). Fashi
+            automatically looks for that white surface in the photo when you hold it up.
+          </Text>
+
+          <View style={styles.hairBlock}>
+            <Text style={styles.h2}>Is this your natural hair colour?</Text>
+            <View style={styles.hairRow}>
+              <Pressable
+                style={[styles.hairOpt, naturalHair === true && styles.hairOn]}
+                onPress={() => setNaturalHair(true)}
+              >
+                <Text style={[styles.hairText, naturalHair === true && styles.hairTextOn]}>
+                  Natural
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.hairOpt, naturalHair === false && styles.hairOn]}
+                onPress={() => setNaturalHair(false)}
+              >
+                <Text style={[styles.hairText, naturalHair === false && styles.hairTextOn]}>
+                  Dyed or coloured
+                </Text>
+              </Pressable>
+            </View>
+            {naturalHair === null && (
+              <Text style={styles.caption}>
+                Pick one before measuring — dyed hair changes the clarity reading, so the hair term
+                would be dropped.
+              </Text>
+            )}
+          </View>
 
           <View style={[styles.statusBox, trend.calibrated ? styles.statusOk : styles.statusWarn]}>
             <Text style={styles.statusTitle}>
@@ -225,6 +350,30 @@ export default function App() {
                 <Text style={styles.resetText}>Long-press to clear calibration set</Text>
               </Pressable>
             )}
+            <Pressable
+              style={styles.reset}
+              onPress={() =>
+                Alert.alert(
+                  "Delete all stored data?",
+                  "Removes saved measurements and calibration samples from this device. Photos are never stored, so there are none to delete.",
+                  [
+                    { text: "Cancel", style: "cancel" },
+                    {
+                      text: "Delete",
+                      style: "destructive",
+                      onPress: async () => {
+                        await clearProfile();
+                        await clearCalibration();
+                        await refitTrend();
+                        Alert.alert("Deleted", "All stored numbers were removed from this device.");
+                      },
+                    },
+                  ]
+                )
+              }
+            >
+              <Text style={styles.resetText}>Delete all my data</Text>
+            </Pressable>
           </View>
         </ScrollView>
       )}
@@ -329,6 +478,20 @@ const styles = StyleSheet.create({
   notesBody: { fontSize: 12, color: "#555", lineHeight: 18 },
   reset: { paddingVertical: 8 },
   resetText: { fontSize: 11, color: "#9B1C1C", fontWeight: "600" },
+  hairBlock: { gap: 8, marginTop: 4 },
+  hairRow: { flexDirection: "row", gap: 10 },
+  hairOpt: {
+    flex: 1,
+    borderWidth: 1.5,
+    borderColor: "#CCC",
+    borderRadius: 12,
+    padding: 12,
+    alignItems: "center",
+  },
+  hairOn: { borderColor: "#111", backgroundColor: "#F4F4F4" },
+  hairText: { fontSize: 13, fontWeight: "600", color: "#777" },
+  hairTextOn: { color: "#111" },
+  consentBullet: { fontSize: 13, color: "#444", lineHeight: 20 },
   back: { paddingHorizontal: 16, paddingVertical: 12 },
   backText: { fontSize: 14, color: "#0A7A55", fontWeight: "700" },
   footerBtns: { padding: 16, gap: 10, paddingBottom: 40 },

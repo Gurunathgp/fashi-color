@@ -22,7 +22,7 @@ export type IlluminantEstimate = {
   white: XYZ;
   cct: number;
   duv: number;
-  method: "sclera" | "skin-prior" | "white-reference" | "shades-of-grey" | "assumed-d65";
+  method: "sclera" | "skin-prior" | "white-reference" | "white-reference-auto" | "shades-of-grey" | "assumed-d65";
   /** 0..1 self-reported reliability, used to propagate into axis confidence. */
   reliability: number;
 };
@@ -56,7 +56,7 @@ function meanRGB(pixels: RGB[]): RGB {
  */
 export function fromNeutralPatch(
   pixels: RGB[],
-  method: "sclera" | "white-reference",
+  method: "sclera" | "white-reference" | "white-reference-auto",
   reliability: number
 ): IlluminantEstimate {
   const white = normaliseToY100(rgbToXYZ(meanRGB(pixels)));
