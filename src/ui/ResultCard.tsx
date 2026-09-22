@@ -1,7 +1,6 @@
-import { View, Text, StyleSheet, ScrollView } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, Share } from "react-native";
 import type { AnalysisResult } from "../capture/analyze";
 import type { Trend } from "../analysis/axes";
-import { describeTriple } from "../analysis/axes";
 
 type Props = {
   result: AnalysisResult;
@@ -105,6 +104,29 @@ export function ResultCard({ result, trend }: Props) {
         ))}
       </View>
 
+      <Pressable
+        style={styles.shareBtn}
+        onPress={() => {
+          const triple = label.calibrated ? label.triple : "Measured (no tone yet)";
+          const tone = label.calibrated ? `${label.tone.korean} · ${label.tone.english}` : "uncalibrated";
+          const top = swatches
+            .slice(0, 6)
+            .map((s) => `${s.name} ${s.hex}`)
+            .join(", ");
+          void Share.share({
+            message:
+              `Fashi colour result (on-device, no photo uploaded)\n` +
+              `${triple} — ${tone}\n` +
+              `Metal: ${metal}${olive ? " · Olive/neutral" : ""}\n` +
+              `Top colours: ${top}\n` +
+              `W ${axes.W.toFixed(2)} D ${axes.D.toFixed(2)} C ${axes.C.toFixed(2)}`,
+          });
+        }}
+        accessibilityRole="button"
+      >
+        <Text style={styles.shareText}>Share result (text)</Text>
+      </Pressable>
+
       <Text style={styles.footnote}>
         Processed entirely on this device. No photo is stored or uploaded; only the numbers above are
         kept, so re-calibration later updates your result without a new photo.
@@ -153,5 +175,7 @@ const styles = StyleSheet.create({
   swatchText: { flex: 1 },
   swatchName: { fontSize: 14, fontWeight: "600", color: "#111" },
   swatchMeta: { fontSize: 11, color: "#666", marginTop: 2 },
+  shareBtn: { backgroundColor: "#111", padding: 13, borderRadius: 12, alignItems: "center" },
+  shareText: { color: "#FFF", fontWeight: "700", fontSize: 13 },
   footnote: { fontSize: 11, color: "#888", lineHeight: 16 },
 });

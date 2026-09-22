@@ -351,13 +351,29 @@ export type Confidence = {
 };
 
 /**
- * Distance-to-split confidence, optionally degraded by measurement disagreement between the
- * neck/jaw/forehead sites. Region disagreement is the cheapest honest signal available: if the
+ * Distance-to-split confidence, degraded by (a) measurement disagreement between the
+ * neck/jaw/forehead sites and (b) illuminant-estimator reliability (plan §3.4:
+ * min(distance to split, illuminant-error propagation via P0.3 budget, agreement)).
+ * Region disagreement is the cheapest honest signal available: if the
  * three sampling sites disagree, something contaminated the capture.
+ * Illuminant reliability 0..1 comes from combineEstimates(); unknown maps to 0.5
+ * so confidence degrades gracefully rather than collapsing or overstating.
  */
-export function axisConfidence(axes: Axes, trend: Trend, regionSpreadDE00 = 0): Confidence {
+export function axisConfidence(
+  axes: Axes,
+  trend: Trend,
+  regionSpreadDE00 = 0,
+  illuminantReliability = 0.5
+): Confidence {
   const sharpness = 0.8;
-  const penalty = Math.exp(-Math.max(0, regionSpreadDE00) / 6);
+  const regionPenalty = Math.exp(-Math.max(0, regionSpreadDE00) / 6);
+  const rel = Number.isFinite(illuminantReliability)
+    ? Math.min(1, Math.max(0, illuminantReliability))
+    : 0.5;
+  // 0.5 + 0.5*rel: perfect reference keeps full confidence, failed estimator halves it.
+  // Matches P0.3 finding that ΔE≈1 white-point error already flips ~48% of labels.
+  const illuminantPenalty = 0.5 + 0.5 * rel;
+  const penalty = regionPenalty * illuminantPenalty;
   const c = (v: number, split: number) =>
     Math.min(1, Math.abs(v - split) / sharpness) * penalty;
   const W = c(axes.W, trend.splitW);

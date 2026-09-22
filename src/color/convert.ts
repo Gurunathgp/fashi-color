@@ -198,7 +198,9 @@ export function deltaE00(lab1: Lab, lab2: Lab): number {
   );
 }
 
-// palette membership helper — fuzzy AND 0..1
+// Legacy Lab-space palette membership helper — fuzzy AND 0..1.
+// @deprecated Canonical per plan §7.1 is `membership()` in `src/analysis/palette.ts`
+// (OKLCh region). Kept for backward-compat + unit tests; new code must use palette.ts.
 export function paletteMembership(
   lab: Lab,
   palette: { hueArcs: { center: number; halfwidth: number }[]; Cmin: number; Cmax: number; Lmin: number; Lmax: number; skinL: number; deltaL: number; isFaceAdjacent: boolean }

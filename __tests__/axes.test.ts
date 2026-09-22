@@ -272,13 +272,31 @@ describe("confidence", () => {
     const near = axisConfidence({ W: TREND.splitW + 0.02, D: 2, C: 2, zH: 0, zC: 0, zL: 0 }, TREND);
     expect(near.W).toBeLessThan(0.1);
     expect(near.weakest).toBe("W");
-    const far = axisConfidence({ W: TREND.splitW + 2, D: 2, C: 2, zH: 0, zC: 0, zL: 0 }, TREND);
+    // Perfect white reference keeps full confidence; unknown estimator (default 0.5)
+    // caps at 0.75 per P0.3 propagation (ΔE≈1 flips ~48% of labels).
+    const far = axisConfidence(
+      { W: TREND.splitW + 2, D: 2, C: 2, zH: 0, zC: 0, zL: 0 },
+      TREND,
+      0,
+      1
+    );
     expect(far.W).toBeCloseTo(1, 6);
+    const farUnknown = axisConfidence(
+      { W: TREND.splitW + 2, D: 2, C: 2, zH: 0, zC: 0, zL: 0 },
+      TREND
+    );
+    expect(farUnknown.W).toBeCloseTo(0.75, 6);
   });
   test("region disagreement degrades every axis", () => {
-    const clean = axisConfidence({ W: 2, D: 2, C: 2, zH: 0, zC: 0, zL: 0 }, TREND, 0);
-    const messy = axisConfidence({ W: 2, D: 2, C: 2, zH: 0, zC: 0, zL: 0 }, TREND, 12);
+    const clean = axisConfidence({ W: 2, D: 2, C: 2, zH: 0, zC: 0, zL: 0 }, TREND, 0, 1);
+    const messy = axisConfidence({ W: 2, D: 2, C: 2, zH: 0, zC: 0, zL: 0 }, TREND, 12, 1);
     expect(messy.overall).toBeLessThan(clean.overall);
+  });
+  test("unreliable illuminant degrades confidence", () => {
+    const good = axisConfidence({ W: 2, D: 2, C: 2, zH: 0, zC: 0, zL: 0 }, TREND, 0, 0.95);
+    const bad = axisConfidence({ W: 2, D: 2, C: 2, zH: 0, zC: 0, zL: 0 }, TREND, 0, 0.05);
+    expect(bad.overall).toBeLessThan(good.overall);
+    expect(good.overall).toBeLessThanOrEqual(1);
   });
   test("identifies the weakest axis", () => {
     const c = axisConfidence({ W: 2, D: 2, C: TREND.splitC + 0.05, zH: 0, zC: 0, zL: 0 }, TREND);
