@@ -14,6 +14,7 @@
     "jpeg-js": "^0.4.4",
     "react": "19.2.3",
     "react-native": "0.86.3",
+    "react-native-nitro-modules": "^0.37.1",
     "react-native-vision-camera": "^5.2.3"
   },
   "devDependencies": {
@@ -30,7 +31,7 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "test": "jest --no-coverage"
+    "test": "jest --watchAll=false --no-coverage"
   },
   "jest": {
     "preset": "jest-expo",

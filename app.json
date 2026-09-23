@@ -22,13 +22,6 @@
     },
     "plugins": [
       [
-        "react-native-vision-camera",
-        {
-          "cameraPermissionText": "Allow Fashi to use camera for on-device color analysis. Photo never leaves your phone.",
-          "enableMicrophonePermission": false
-        }
-      ],
-      [
         "expo-image-picker",
         {
           "photosPermission": "Allow Fashi to pick photo for color analysis."

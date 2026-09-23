@@ -24,6 +24,7 @@ import { paletteFor, sampleSwatches, type PaletteRegion, type Swatch } from "../
 import {
   measureSkin,
   measureHair,
+  measureHairFromMask,
   computeGateMetrics,
   regionRects,
   sampleRegion,
@@ -40,6 +41,15 @@ import {
   fromShadesOfGrey,
   type IlluminantEstimate,
 } from "./illuminant";
+import {
+  detectFaceLandmarks,
+  MIN_PLAUSIBLE_FACE_CONFIDENCE,
+  type FaceLandmarks,
+} from "./faceLandmarker";
+import {
+  segmentMulticlass,
+  type MulticlassSegmentation,
+} from "./segmentation";
 
 export type AnalysisOptions = {
   trend: Trend;
@@ -64,6 +74,9 @@ export type AnalysisResult = {
   metal: ReturnType<typeof metalFor>;
   olive: boolean;
   contrast: number;
+  geometry: FaceGeometry;
+  landmarks: FaceLandmarks;
+  segmentation: MulticlassSegmentation;
 };
 
 /** Decode a JPEG into an RGBA buffer, downscaling by an integer factor to keep JS work bounded. */
@@ -105,65 +118,11 @@ export function decodeJpegToBuffer(bytes: Uint8Array, maxDim = 640): ImageBuffer
   return { width: w, height: h, data: out };
 }
 
-/**
- * Very coarse face locator: finds the largest connected-ish band of skin-like pixels by row/column
- * projection. This is a placeholder for MediaPipe Face Landmarker (P1.2) and is honest about it -
- * it returns confidence so the gate can refuse when the estimate is poor, rather than pretending
- * to have landmarks.
- */
-export function locateFace(img: ImageBuffer): { geometry: FaceGeometry; confidence: number } {
-  const colScore = new Array(img.width).fill(0);
-  const rowScore = new Array(img.height).fill(0);
-  let hits = 0;
-  const step = Math.max(1, Math.floor(Math.min(img.width, img.height) / 160));
-  for (let y = 0; y < img.height; y += step) {
-    for (let x = 0; x < img.width; x += step) {
-      const o = (y * img.width + x) * 4;
-      const r = img.data[o];
-      const g = img.data[o + 1];
-      const b = img.data[o + 2];
-      // Skin-like: R > G > B with moderate separation, not clipped.
-      if (r > 60 && r < 250 && r > g + 8 && g > b + 2 && r - b < 120) {
-        colScore[x] += 1;
-        rowScore[y] += 1;
-        hits++;
-      }
-    }
-  }
-  const sampled = Math.ceil(img.width / step) * Math.ceil(img.height / step);
-  const coverage = hits / Math.max(1, sampled);
-
-  const span = (scores: number[], size: number) => {
-    const max = Math.max(...scores);
-    if (max <= 0) return { lo: 0, hi: size };
-    const thresh = max * 0.35;
-    let lo = 0;
-    let hi = size - 1;
-    while (lo < size && scores[lo] < thresh) lo++;
-    while (hi > lo && scores[hi] < thresh) hi--;
-    return { lo, hi };
-  };
-  const cs = span(colScore, img.width);
-  const rs = span(rowScore, img.height);
-
-  const w = Math.max(1, cs.hi - cs.lo) / img.width;
-  const h = Math.max(1, rs.hi - rs.lo) / img.height;
-  const geometry: FaceGeometry = {
-    box: { x: cs.lo / img.width, y: rs.lo / img.height, w, h },
-    // IPD is roughly 0.46 of face width for adult faces; a stand-in until landmarks exist.
-    ipdPx: 0.46 * w * img.width,
-    yaw: 0,
-    pitch: 0,
-  };
-  // Plausibility: a face should cover a meaningful but not absurd share of the frame.
-  const plausible = coverage > 0.04 && coverage < 0.85 && w > 0.12 && h > 0.12;
-  return { geometry, confidence: plausible ? Math.min(0.6, coverage * 2) : 0 };
-}
-
 export function analyseBuffer(img: ImageBuffer, opts: AnalysisOptions): AnalysisResult {
-  const { geometry, confidence: faceConfidence } = locateFace(img);
+  const { landmarks, geometry, confidence: faceConfidence, scleraPixels } = detectFaceLandmarks(img);
+  const segmentation = segmentMulticlass(img, landmarks);
   const measurement = measureSkin(img, geometry);
-  const hair = measureHair(img, geometry);
+  const hair = measureHairFromMask(img, segmentation.hairMask) ?? measureHair(img, geometry);
 
   // --- illuminant -------------------------------------------------------
   const estimates: IlluminantEstimate[] = [];
@@ -182,6 +141,12 @@ export function analyseBuffer(img: ImageBuffer, opts: AnalysisOptions): Analysis
     const auto = detectWhiteReference(img, geometry.box);
     if (auto) estimates.push(fromNeutralPatch([auto.rgb], "white-reference-auto", 0.7));
   }
+
+  // Sclera prior (plan §4 & P1.5): natural neutral cue present in every face
+  if (scleraPixels.length >= 4) {
+    estimates.push(fromNeutralPatch(scleraPixels, "sclera", 0.65));
+  }
+
   if (Number.isFinite(measurement.skin.L)) {
     // Population prior: expected neutral-warm skin a*/b* at this lightness.
     const prior: Lab = { L: measurement.skin.L, a: 14, b: 18 };
@@ -217,18 +182,21 @@ export function analyseBuffer(img: ImageBuffer, opts: AnalysisOptions): Analysis
 
   // --- gate -------------------------------------------------------------
   const metrics = computeGateMetrics(img, geometry, measurement);
+  // Only forward geometry-derived metrics when the detector considers the box plausible. The
+  // estimator returns 0.2 for "skin-like pixels found, but this is not a face"; a gate that
+  // accepts a guess as a measurement is worse than one that reports "not measured".
+  const faceUsable = faceConfidence >= MIN_PLAUSIBLE_FACE_CONFIDENCE;
   const gate = runQualityGate({
     ...metrics,
-    // Face geometry is a placeholder, so pose cannot be measured: report skipped, not pass.
-    yaw: undefined,
-    pitch: undefined,
-    ipdPx: faceConfidence > 0 ? metrics.ipdPx : undefined,
-    faceBoxRatio: faceConfidence > 0 ? metrics.faceBoxRatio : undefined,
+    yaw: faceUsable ? geometry.yaw : undefined,
+    pitch: faceUsable ? geometry.pitch : undefined,
+    ipdPx: faceUsable ? metrics.ipdPx : undefined,
+    faceBoxRatio: faceUsable ? metrics.faceBoxRatio : undefined,
     cct: illuminant.cct,
     duv: illuminant.duv,
     highFreqThreshold: opts.highFreqThreshold,
     illuminantReliability: illuminant.reliability,
-    clothesAdjacentSaturated: undefined,
+    clothesAdjacentSaturated: segmentation.clothingBounce.clothesAdjacentSaturated,
   });
 
   // --- axes & outputs ---------------------------------------------------
@@ -260,6 +228,9 @@ export function analyseBuffer(img: ImageBuffer, opts: AnalysisOptions): Analysis
     metal: metalFor(axes.W, opts.trend),
     olive: isOlive(axes, opts.trend),
     contrast: personalContrast(skinD65, hairD65),
+    geometry,
+    landmarks,
+    segmentation,
   };
 }
 

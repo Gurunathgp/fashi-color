@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, Share } from "react-native";
 import type { AnalysisResult } from "../capture/analyze";
 import type { Trend } from "../analysis/axes";
+import { ShareCard } from "./ShareCard";
 
 type Props = {
   result: AnalysisResult;
@@ -20,6 +22,7 @@ type Props = {
  * unusable for them.
  */
 export function ResultCard({ result, trend }: Props) {
+  const [showShareCard, setShowShareCard] = useState(false);
   const { axes, confidence, label, swatches, metal, olive, skinD65, hairD65, illuminant, contrast } = result;
 
   return (
@@ -104,28 +107,45 @@ export function ResultCard({ result, trend }: Props) {
         ))}
       </View>
 
-      <Pressable
-        style={styles.shareBtn}
-        onPress={() => {
-          const triple = label.calibrated ? label.triple : "Measured (no tone yet)";
-          const tone = label.calibrated ? `${label.tone.korean} · ${label.tone.english}` : "uncalibrated";
-          const top = swatches
-            .slice(0, 6)
-            .map((s) => `${s.name} ${s.hex}`)
-            .join(", ");
-          void Share.share({
-            message:
-              `Fashi colour result (on-device, no photo uploaded)\n` +
-              `${triple} — ${tone}\n` +
-              `Metal: ${metal}${olive ? " · Olive/neutral" : ""}\n` +
-              `Top colours: ${top}\n` +
-              `W ${axes.W.toFixed(2)} D ${axes.D.toFixed(2)} C ${axes.C.toFixed(2)}`,
-          });
-        }}
-        accessibilityRole="button"
-      >
-        <Text style={styles.shareText}>Share result (text)</Text>
-      </Pressable>
+      <View style={styles.shareRow}>
+        <Pressable
+          style={styles.visualCardBtn}
+          onPress={() => setShowShareCard(true)}
+          accessibilityRole="button"
+        >
+          <Text style={styles.visualCardBtnText}>✦ View visual share card</Text>
+        </Pressable>
+
+        <Pressable
+          style={styles.shareBtn}
+          onPress={() => {
+            const triple = label.calibrated ? label.triple : "Measured (no tone yet)";
+            const tone = label.calibrated ? `${label.tone.korean} · ${label.tone.english}` : "uncalibrated";
+            const top = swatches
+              .slice(0, 6)
+              .map((s) => `${s.name} ${s.hex}`)
+              .join(", ");
+            void Share.share({
+              message:
+                `Fashi colour result (on-device, no photo uploaded)\n` +
+                `${triple} — ${tone}\n` +
+                `Metal: ${metal}${olive ? " · Olive/neutral" : ""}\n` +
+                `Top colours: ${top}\n` +
+                `W ${axes.W.toFixed(2)} D ${axes.D.toFixed(2)} C ${axes.C.toFixed(2)}`,
+            });
+          }}
+          accessibilityRole="button"
+        >
+          <Text style={styles.shareText}>Share text</Text>
+        </Pressable>
+      </View>
+
+      <ShareCard
+        result={result}
+        trend={trend}
+        visible={showShareCard}
+        onClose={() => setShowShareCard(false)}
+      />
 
       <Text style={styles.footnote}>
         Processed entirely on this device. No photo is stored or uploaded; only the numbers above are
@@ -175,7 +195,17 @@ const styles = StyleSheet.create({
   swatchText: { flex: 1 },
   swatchName: { fontSize: 14, fontWeight: "600", color: "#111" },
   swatchMeta: { fontSize: 11, color: "#666", marginTop: 2 },
-  shareBtn: { backgroundColor: "#111", padding: 13, borderRadius: 12, alignItems: "center" },
-  shareText: { color: "#FFF", fontWeight: "700", fontSize: 13 },
+  shareRow: { flexDirection: "column", gap: 8 },
+  visualCardBtn: {
+    backgroundColor: "#16181F",
+    padding: 14,
+    borderRadius: 12,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#2E3342",
+  },
+  visualCardBtnText: { color: "#FFF", fontWeight: "800", fontSize: 13, letterSpacing: 0.3 },
+  shareBtn: { backgroundColor: "#F0F0F0", padding: 12, borderRadius: 12, alignItems: "center" },
+  shareText: { color: "#222", fontWeight: "700", fontSize: 13 },
   footnote: { fontSize: 11, color: "#888", lineHeight: 16 },
 });

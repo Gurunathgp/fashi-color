@@ -2,21 +2,36 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, Image, ActivityIndicator, Alert } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
-import * as FileSystem from "expo-file-system";
+// expo-file-system 57 moved the classic API: on the default entry `readAsStringAsync` /
+// `deleteAsync` log a deprecation and THROW at runtime, which would break every capture. The
+// documented migration is to import them from "expo-file-system/legacy" (see AGENTS.md).
+import * as FileSystem from "expo-file-system/legacy";
 import { Buffer } from "buffer";
 
-import { analyseJpeg, type AnalysisResult } from "./src/capture/analyze";
+import { analyseBuffer, decodeJpegToBuffer, type AnalysisResult } from "./src/capture/analyze";
+import type { ImageBuffer } from "./src/capture/sampler";
 import {
   fitTrend,
   UNCALIBRATED_TREND,
   MIN_CALIBRATION_N,
   axisConfidence,
+  deriveLabel,
+  metalFor,
+  isOlive,
   type Trend,
 } from "./src/analysis/axes";
-import { drapeQuiz, applyQuizAnswers, type DrapePair } from "./src/analysis/drape";
+import { paletteFor, sampleSwatches } from "./src/analysis/palette";
+import {
+  drapeQuiz,
+  applyQuizAnswers,
+  compositePhotoDrape,
+  bufferToJpegDataUri,
+  type DrapePair,
+} from "./src/analysis/drape";
 import { ResultCard } from "./src/ui/ResultCard";
 import { DrapeComparison } from "./src/ui/DrapeComparison";
 import { GateReport } from "./src/ui/GateReport";
+import { CameraScreen } from "./src/capture/CameraScreen";
 import {
   appendCalibrationSample,
   loadCalibration,
@@ -26,15 +41,19 @@ import {
   clearCalibration,
   loadConsent,
   saveConsent,
+  resultFromStoredProfile,
+  type StoredProfile,
 } from "./src/storage/profile";
 
-type Screen = "home" | "gate" | "result" | "drape";
+type Screen = "home" | "camera" | "gate" | "result" | "drape";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("home");
   const [busy, setBusy] = useState(false);
   const [imageUri, setImageUri] = useState<string | null>(null);
+  const [imageBuffer, setImageBuffer] = useState<ImageBuffer | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [savedProfile, setSavedProfile] = useState<StoredProfile | null>(null);
   const [trend, setTrend] = useState<Trend>(UNCALIBRATED_TREND);
   const [answers, setAnswers] = useState<{ axis: "W" | "D" | "C"; sign: 1 | -1 }[]>([]);
   const [quizIndex, setQuizIndex] = useState(0);
@@ -53,7 +72,7 @@ export default function App() {
 
   useEffect(() => {
     void refitTrend();
-    void loadProfile();
+    void loadProfile().then(setSavedProfile);
     void loadConsent().then(setConsent);
   }, [refitTrend]);
 
@@ -94,8 +113,9 @@ export default function App() {
       try {
         const base64 = await FileSystem.readAsStringAsync(uri, { encoding: "base64" });
         const bytes = new Uint8Array(Buffer.from(base64, "base64"));
-        const r = analyseJpeg(bytes, { trend, naturalHair: naturalHair ?? true });
-        // Free the JPEG bytes promptly; result holds numbers only.
+        const buf = decodeJpegToBuffer(bytes);
+        setImageBuffer(buf);
+        const r = analyseBuffer(buf, { trend, naturalHair: naturalHair ?? true });
         setResult(r);
         setAnswers([]);
         setQuizIndex(0);
@@ -123,19 +143,10 @@ export default function App() {
     await analyse(res.assets[0].uri);
   }, [analyse, deleteCacheFile, imageUri, requireHairAnswer]);
 
-  const takePhoto = useCallback(async () => {
+  const takePhoto = useCallback(() => {
     if (!requireHairAnswer()) return;
-    const perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) {
-      Alert.alert("Camera access needed", "Fashi reads the frame on-device and never uploads it.");
-      return;
-    }
-    const res = await ImagePicker.launchCameraAsync({ quality: 1 });
-    if (res.canceled || !res.assets?.[0]) return;
-    await deleteCacheFile(imageUri);
-    setImageUri(res.assets[0].uri);
-    await analyse(res.assets[0].uri);
-  }, [analyse, deleteCacheFile, imageUri, requireHairAnswer]);
+    setScreen("camera");
+  }, [requireHairAnswer]);
 
   const quiz: DrapePair[] = useMemo(() => {
     if (!result) return [];
@@ -148,11 +159,50 @@ export default function App() {
     return drapeQuiz(result.axes, trend, conf.weakest);
   }, [result, trend]);
 
+  const currentPair: DrapePair | undefined = quiz[Math.min(quizIndex, Math.max(0, quiz.length - 1))];
+
+  const { drapeUriA, drapeUriB } = useMemo(() => {
+    if (!imageBuffer || !result?.segmentation?.clothingMask || !currentPair) {
+      return { drapeUriA: null, drapeUriB: null };
+    }
+    try {
+      const drapedA = compositePhotoDrape(imageBuffer, result.segmentation.clothingMask, currentPair.a.rgb);
+      const drapedB = compositePhotoDrape(imageBuffer, result.segmentation.clothingMask, currentPair.b.rgb);
+      return {
+        drapeUriA: bufferToJpegDataUri(drapedA, 75),
+        drapeUriB: bufferToJpegDataUri(drapedB, 75),
+      };
+    } catch {
+      return { drapeUriA: null, drapeUriB: null };
+    }
+  }, [imageBuffer, result, currentPair]);
+
   const adjustedResult = useMemo(() => {
     if (!result) return null;
     if (answers.length === 0) return result;
-    return { ...result, axes: applyQuizAnswers(result.axes, answers) };
-  }, [result, answers]);
+    const nextAxes = applyQuizAnswers(result.axes, answers);
+    const confidence = axisConfidence(
+      nextAxes,
+      trend,
+      result.measurement.regionSpreadDE00,
+      result.illuminant.reliability
+    );
+    const label = deriveLabel(nextAxes, trend);
+    const palette = paletteFor(nextAxes, result.skinD65, trend);
+    const swatches = sampleSwatches(palette);
+    const metal = metalFor(nextAxes.W, trend);
+    const olive = isOlive(nextAxes, trend);
+    return {
+      ...result,
+      axes: nextAxes,
+      confidence,
+      label,
+      palette,
+      swatches,
+      metal,
+      olive,
+    };
+  }, [result, answers, trend]);
 
   const addToCalibration = useCallback(async () => {
     if (!result || !Number.isFinite(result.skinD65.L)) {
@@ -174,7 +224,7 @@ export default function App() {
   const persist = useCallback(async () => {
     const r = adjustedResult;
     if (!r) return;
-    await saveProfile({
+    const record = {
       axes: r.axes,
       skinLab: r.skinD65,
       hairLab: r.hairD65,
@@ -183,7 +233,10 @@ export default function App() {
       illuminantReliability: r.illuminant.reliability,
       naturalHair: naturalHair ?? true,
       quizAnswers: answers,
-    });
+    };
+    await saveProfile(record);
+    const loaded = await loadProfile();
+    setSavedProfile(loaded);
     Alert.alert(
       "Saved on device",
       "Only the numbers were stored (axes, Lab, contrast, CCT). Picker cache is deleted; no photo is kept."
@@ -279,14 +332,58 @@ export default function App() {
 
           <View style={[styles.statusBox, trend.calibrated ? styles.statusOk : styles.statusWarn]}>
             <Text style={styles.statusTitle}>
-              {trend.calibrated ? `Trend fitted on ${trend.n} subjects` : "Trend not yet calibrated"}
+              {trend.calibrated ? `Trend fitted on ${trend.n} captures` : "Trend not yet calibrated"}
             </Text>
             <Text style={styles.statusBody}>
               {trend.calibrated
-                ? "Tone labels are enabled. Split points come from your own calibration set, not Western prototypes."
-                : `The engine will report measurements but refuse to name a tone until ${MIN_CALIBRATION_N} calibration subjects are stored (P0.5/P0.6). Currently ${trend.n}.`}
+                ? "Tone labels are enabled. Split points come from your own captures, not Western prototypes."
+                : `The engine reports measurements, palette and metal, but refuses to name a tone until ${MIN_CALIBRATION_N} real calibration captures are stored (P0.5/P0.6). Currently ${trend.n}.`}
             </Text>
           </View>
+
+          {savedProfile && (
+            <View style={styles.savedCard}>
+              <View style={styles.savedCardHeader}>
+                <Text style={styles.savedCardEyebrow}>Your Saved Profile</Text>
+                <Text style={styles.savedCardDate}>
+                  {new Date(savedProfile.updatedAt).toLocaleDateString()}
+                </Text>
+              </View>
+              {(() => {
+                const pLabel = deriveLabel(savedProfile.axes, trend);
+                const pMetal = metalFor(savedProfile.axes.W, trend);
+                return (
+                  <>
+                    <Text style={styles.savedCardTriple}>
+                      {pLabel.calibrated ? pLabel.triple : "Measured Profile"}
+                    </Text>
+                    {pLabel.calibrated && (
+                      <Text style={styles.savedCardTone}>
+                        {pLabel.tone.korean} · {pLabel.tone.english}
+                      </Text>
+                    )}
+                    <Text style={styles.savedCardMetal}>
+                      {pMetal === "gold" ? "✦ Gold Suits You" : pMetal === "silver" ? "✦ Silver Suits You" : "✦ Both Metals Suit You"}
+                    </Text>
+                  </>
+                );
+              })()}
+              <Pressable
+                style={styles.savedCardBtn}
+                onPress={() => {
+                  const reconstructed = resultFromStoredProfile(savedProfile, trend);
+                  setResult(reconstructed);
+                  setImageBuffer(null);
+                  setImageUri(null);
+                  setAnswers([]);
+                  setQuizIndex(0);
+                  setScreen("result");
+                }}
+              >
+                <Text style={styles.savedCardBtnText}>View saved measurements & palette →</Text>
+              </Pressable>
+            </View>
+          )}
 
           <Pressable style={styles.primary} onPress={takePhoto} disabled={busy}>
             <Text style={styles.primaryText}>Take a photo</Text>
@@ -326,18 +423,24 @@ export default function App() {
             <Text style={styles.notesTitle}>Build status</Text>
             <Text style={styles.notesBody}>
               Colour maths, Bradford adaptation, Planckian and daylight loci, CCT/Duv, illuminant
-              estimation, pixel sampling, quality gate, axes, palette region and drape rendering are
+              estimation, pixel sampling, quality gate, axes, palette region, and digital draping are
               implemented and unit-tested.
             </Text>
             <Text style={styles.notesBody}>
-              Still stubbed: MediaPipe face landmarks and hair segmentation. Face geometry currently
-              comes from a coarse skin-colour projection, so head pose is reported as not measured
-              rather than passed, and neck/jaw/forehead rectangles are approximate.
+              Facial geometry, head pose (yaw/pitch), the sclera illuminant prior, and the clothing
+              bounce check come from a pixel-based geometric estimator (src/capture/faceLandmarker.ts
+              + segmentation.ts). It is not MediaPipe: the 478 mesh points are anchored from the
+              measured face box, and the sclera/clothing masks are colour heuristics. Replacing it
+              with the TFLite Face Landmarker + Selfie Multiclass models is still P1.2/P1.3 work.
             </Text>
             <Text style={styles.notesBody}>
-              Calibration on this device: {trend.n} subject{trend.n === 1 ? "" : "s"}.
-              {trend.n > 0 ? " " : ""}
-              {trend.n > 0 ? "Long-press below to reset." : ""}
+              Calibration on this device: {trend.n} capture{trend.n === 1 ? "" : "s"}.
+              {trend.n > 0 ? " Long-press below to clear." : ""}
+            </Text>
+            <Text style={styles.notesBody}>
+              The bundled Monk Skin Tone baseline (calibrationData.ts) is synthetic reference data,
+              so it is never fitted as your calibration: a tone name needs {MIN_CALIBRATION_N}+ real
+              captures.
             </Text>
             {trend.n > 0 && (
               <Pressable
@@ -363,6 +466,7 @@ export default function App() {
                       style: "destructive",
                       onPress: async () => {
                         await clearProfile();
+                        setSavedProfile(null);
                         await clearCalibration();
                         await refitTrend();
                         Alert.alert("Deleted", "All stored numbers were removed from this device.");
@@ -376,6 +480,17 @@ export default function App() {
             </Pressable>
           </View>
         </ScrollView>
+      )}
+
+      {screen === "camera" && (
+        <CameraScreen
+          onCapture={async (uri) => {
+            await deleteCacheFile(imageUri);
+            setImageUri(uri);
+            await analyse(uri);
+          }}
+          onCancel={() => setScreen("home")}
+        />
       )}
 
       {screen === "gate" && result && (
@@ -399,7 +514,12 @@ export default function App() {
 
       {screen === "result" && adjustedResult && (
         <ScrollView>
-          <Back onPress={() => setScreen("gate")} label="Quality report" />
+          <View style={styles.resultNav}>
+            <Back onPress={() => setScreen("home")} label="Home" />
+            {(result?.gate?.checks?.length ?? 0) > 0 && (
+              <Back onPress={() => setScreen("gate")} label="Quality report" />
+            )}
+          </View>
           <ResultCard result={adjustedResult} trend={trend} />
           <View style={styles.footerBtns}>
             <Pressable style={styles.primary} onPress={() => setScreen("drape")}>
@@ -412,16 +532,18 @@ export default function App() {
         </ScrollView>
       )}
 
-      {screen === "drape" && result && quiz.length > 0 && (
+      {screen === "drape" && result && quiz.length > 0 && currentPair && (
         <ScrollView>
           <Back onPress={() => setScreen("result")} label="Measurements" />
           <DrapeComparison
-            pair={quiz[Math.min(quizIndex, quiz.length - 1)]}
+            pair={currentPair}
             index={Math.min(quizIndex, quiz.length - 1)}
             total={quiz.length}
             selected={null}
+            drapeUriA={drapeUriA}
+            drapeUriB={drapeUriB}
             onSelect={(side) => {
-              const pair = quiz[Math.min(quizIndex, quiz.length - 1)];
+              const pair = currentPair;
               const opt = side === "a" ? pair.a : pair.b;
               setAnswers((prev) => [...prev, { axis: pair.axis, sign: opt.sign }]);
               if (quizIndex + 1 < quiz.length) setQuizIndex(quizIndex + 1);
@@ -494,6 +616,36 @@ const styles = StyleSheet.create({
   consentBullet: { fontSize: 13, color: "#444", lineHeight: 20 },
   back: { paddingHorizontal: 16, paddingVertical: 12 },
   backText: { fontSize: 14, color: "#0A7A55", fontWeight: "700" },
+  resultNav: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  savedCard: {
+    backgroundColor: "#16181F",
+    borderRadius: 14,
+    padding: 16,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: "#2E3342",
+  },
+  savedCardHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  savedCardEyebrow: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#8E95A5",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+  },
+  savedCardDate: { fontSize: 11, color: "#727B8E" },
+  savedCardTriple: { fontSize: 20, fontWeight: "800", color: "#FFF" },
+  savedCardTone: { fontSize: 13, color: "#D0D5DD", fontWeight: "600" },
+  savedCardMetal: { fontSize: 12, color: "#F0D078", fontWeight: "700", marginTop: 2 },
+  savedCardBtn: {
+    backgroundColor: "#FFF",
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    marginTop: 6,
+  },
+  savedCardBtnText: { color: "#111", fontSize: 13, fontWeight: "700" },
   footerBtns: { padding: 16, gap: 10, paddingBottom: 40 },
   caution: { fontSize: 12, color: "#8A5A00", lineHeight: 17 },
   caption: { fontSize: 12, color: "#666", lineHeight: 17 },

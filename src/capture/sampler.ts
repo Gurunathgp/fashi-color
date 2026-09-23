@@ -2,9 +2,10 @@
 //
 // Everything here operates on a plain RGBA buffer plus a face geometry description, so it is
 // testable without MediaPipe and can later be fed by a real Face Landmarker + Selfie Multiclass
-// mask without changing the maths. Until those models land, geometry comes from a coarse face
-// box, which is enough to compute honest gate metrics from real pixels rather than the hardcoded
-// constants the app previously passed in.
+// mask without changing the maths. Geometry currently comes from the pixel-based estimator in
+// faceLandmarker.ts (approximate: see the note at the top of that file), which is enough to compute
+// honest gate metrics from real pixels rather than the hardcoded constants the app previously
+// passed in.
 
 import type { Lab, RGB } from "../color/convert";
 import { sRGBToLab, deltaE00, labToLCh } from "../color/convert";
@@ -283,7 +284,7 @@ export function measureSkin(img: ImageBuffer, geo: FaceGeometry): SkinMeasuremen
   };
 }
 
-/** Hair sample: strip above the forehead. Replace with the Selfie Multiclass hair mask later. */
+/** Hair sample: strip above the forehead. Fallback when multiclass segmentation mask is absent. */
 export function measureHair(img: ImageBuffer, geo: FaceGeometry): RegionStats {
   const { x, y, w, h } = geo.box;
   const rect = {
@@ -293,6 +294,45 @@ export function measureHair(img: ImageBuffer, geo: FaceGeometry): RegionStats {
     h: h * img.height * 0.1,
   };
   return sampleRegion(img, "forehead", rect, { skipSkinGate: true });
+}
+
+/**
+ * Hair sample from a multiclass hair mask (plan section 4.1, 4.2, P1.2).
+ *
+ * Steps two pixels at a time to bound the cost of the Lab conversion over a full-frame mask. The
+ * `region` value keeps the "forehead" name this fallback replaced for type-compatibility; it is
+ * reported as hair by the caller, never as a skin site.
+ */
+export function measureHairFromMask(img: ImageBuffer, hairMask: Uint8Array): RegionStats | null {
+  const labs: Lab[] = [];
+  const rgbs: RGB[] = [];
+  const n = hairMask.length;
+  for (let i = 0; i < n; i += 2) {
+    if (hairMask[i]) {
+      const o = i * 4;
+      const rgb: RGB = { r: img.data[o], g: img.data[o + 1], b: img.data[o + 2] };
+      rgbs.push(rgb);
+      labs.push(sRGBToLab(rgb));
+      if (labs.length >= 500) break;
+    }
+  }
+  if (labs.length < 10) return null;
+  const L = labs.map((l) => l.L).sort((a, b) => a - b);
+  const medL = L[Math.floor(L.length / 2)];
+  const medA = labs.map((l) => l.a).sort((a, b) => a - b)[Math.floor(labs.length / 2)];
+  const medB = labs.map((l) => l.b).sort((a, b) => a - b)[Math.floor(labs.length / 2)];
+  const avgR = rgbs.reduce((acc, c) => acc + c.r, 0) / rgbs.length;
+  const avgG = rgbs.reduce((acc, c) => acc + c.g, 0) / rgbs.length;
+  const avgB = rgbs.reduce((acc, c) => acc + c.b, 0) / rgbs.length;
+  return {
+    region: "forehead",
+    n: labs.length,
+    considered: labs.length,
+    lab: { L: medL, a: medA, b: medB },
+    rgb: { r: Math.round(avgR), g: Math.round(avgG), b: Math.round(avgB) },
+    // Measured, not assumed: the spread of the accepted hair pixels.
+    madL: madOf(labs.map((l) => l.L)),
+  };
 }
 
 // ---------------------------------------------------------------------------

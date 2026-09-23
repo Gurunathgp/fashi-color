@@ -12,6 +12,9 @@ import type { Lab, RGB } from "../color/convert";
 import { sRGBToLab, labToSRGB, labToLCh, lchToLab } from "../color/convert";
 import type { Axes, Trend } from "./axes";
 import { UNCALIBRATED_TREND } from "./axes";
+import type { ImageBuffer } from "../capture/sampler";
+import { encode as encodeJpeg } from "jpeg-js";
+import { Buffer } from "buffer";
 
 /**
  * Recolour one pixel: keep its lightness, take the target's chroma and hue.
@@ -50,6 +53,35 @@ export function recolorMasked(
     rgba[o + 1] = out.g;
     rgba[o + 2] = out.b;
   }
+}
+
+/**
+ * Composites a drape color onto an actual user photo buffer.
+ * Per plan section 7.2:
+ * Converts the drape region to CIELAB, keeps original L* (so natural fabric folds and shadows survive),
+ * and replaces only a* and b*. Never touches face pixels.
+ */
+export function compositePhotoDrape(
+  img: ImageBuffer,
+  mask: Uint8Array | number[],
+  target: RGB
+): ImageBuffer {
+  const cloned = new Uint8Array(img.data);
+  recolorMasked(cloned, mask, target);
+  return { width: img.width, height: img.height, data: cloned };
+}
+
+/**
+ * Encodes an ImageBuffer to a base64 JPEG data URI for direct display in React Native <Image />.
+ */
+export function bufferToJpegDataUri(img: ImageBuffer, quality = 80): string {
+  const uint8 = img.data instanceof Uint8Array ? img.data : new Uint8Array(img.data);
+  const encoded = encodeJpeg(
+    { data: uint8 as any, width: img.width, height: img.height },
+    quality
+  );
+  const base64 = Buffer.from(encoded.data).toString("base64");
+  return `data:image/jpeg;base64,${base64}`;
 }
 
 /**

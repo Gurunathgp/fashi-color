@@ -12,6 +12,8 @@
 //     extreme as -7.5 on the app's own demo presets. Trends must now be fitted from real
 //     captures via fitTrend(); until then the engine reports calibrated:false and refuses to
 //     emit a label (UNCALIBRATED_TREND has zeroed statistics purely so the maths stays defined).
+//     A Trend also carries its provenance (Trend.source): a bundled synthetic reference set can
+//     be fitted for inspection, but only source:"captured" unlocks a tone name.
 //  3. computeAxes now returns the underlying z-scores. isOlive needs z_C, which previously had
 //     no path out of the function, so the olive/neutral outcome - the single most important
 //     feature for South Asian skin - could never fire.
@@ -34,6 +36,14 @@ export type Axes = {
   zL: number;
 };
 
+export type TrendSource =
+  /** No data at all; every field is a placeholder. */
+  | "none"
+  /** Bundled MST-derived reference profiles. Reference only - never used to name a season. */
+  | "synthetic"
+  /** Fitted from captures measured on a real device (P0.5). */
+  | "captured";
+
 export type Trend = {
   /** Hue as a function of L*: h = slopeH * L + interceptH. */
   slopeH: number;
@@ -51,7 +61,9 @@ export type Trend = {
   splitW: number;
   splitD: number;
   splitC: number;
-  /** False until fitTrend() has run on real captures. Gates label display. */
+  /** Where the numbers came from. Only "captured" may name a tone (see deriveLabel). */
+  source: TrendSource;
+  /** False until fitTrend() has run on at least MIN_CALIBRATION_N real captures. */
   calibrated: boolean;
   /** Subjects behind the fit, for honest confidence reporting. */
   n: number;
@@ -73,6 +85,7 @@ export const UNCALIBRATED_TREND: Trend = {
   splitW: 0,
   splitD: 0,
   splitC: 0,
+  source: "none",
   calibrated: false,
   n: 0,
 };
@@ -136,7 +149,12 @@ export type CalibrationSample = { skin: Lab; hair: Lab };
  */
 export const MIN_CALIBRATION_N = 15;
 
-export function fitTrend(samples: CalibrationSample[]): Trend {
+/**
+ * @param samples Skin/hair measurements. Must be real captures to unlock labels.
+ * @param source  Provenance of `samples`. Only "captured" can produce calibrated:true, so a
+ *   bundled reference set cannot silently name a season for a user (see deriveLabel).
+ */
+export function fitTrend(samples: CalibrationSample[], source: TrendSource = "captured"): Trend {
   if (samples.length < 3) return { ...UNCALIBRATED_TREND, n: samples.length };
 
   const Ls = samples.map((s) => s.skin.L);
@@ -175,7 +193,8 @@ export function fitTrend(samples: CalibrationSample[]): Trend {
     splitW: median(zH),
     splitD: median(zL.map((z) => -z)),
     splitC: median(cVals),
-    calibrated: samples.length >= MIN_CALIBRATION_N,
+    source,
+    calibrated: source === "captured" && samples.length >= MIN_CALIBRATION_N,
     n: samples.length,
   };
 }
@@ -287,16 +306,20 @@ export type LabelResult =
 
 /**
  * Derive the displayed label. Returns calibrated:false rather than guessing when the trend has
- * not been fitted - the plan's rule is that refusing beats confidently mislabelling.
+ * not been fitted on real captures - the plan's rule is that refusing beats confidently
+ * mislabelling. A synthetic reference set (the bundled MST baseline) is explicitly excluded: its
+ * numbers were never measured on anybody, so it cannot name a season for a user.
  */
 export function deriveLabel(axes: Axes, trend: Trend): LabelResult {
   if (!trend.calibrated) {
     return {
       calibrated: false,
       reason:
-        trend.n === 0
-          ? "No calibration data yet. Run P0.5 captures, then fitTrend()."
-          : `Only ${trend.n} calibration subjects; ${MIN_CALIBRATION_N} needed before a tone label is meaningful.`,
+        trend.source === "synthetic"
+          ? `Tone labels need real calibration captures (${MIN_CALIBRATION_N}+, plan P0.5). The bundled Monk Skin Tone baseline is synthetic reference data, so it is not used to name a season.`
+          : trend.n === 0
+            ? "No calibration data yet. Run P0.5 captures, then fitTrend()."
+            : `Only ${trend.n} calibration subjects; ${MIN_CALIBRATION_N} needed before a tone label is meaningful.`,
       triple: null,
       tone: null,
     };
