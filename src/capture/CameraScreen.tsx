@@ -95,7 +95,7 @@ export function CameraScreen({ onCapture, onCancel }: Props) {
           return;
         }
       }
-      const res = await ImagePicker.launchCameraAsync({ quality: 1 });
+      const res = await ImagePicker.launchCameraAsync({ quality: 1, base64: true });
       if (!res.canceled && res.assets?.[0]?.uri) onCapture(res.assets[0].uri);
     } catch (e) {
       Alert.alert("Camera Error", e instanceof Error ? e.message : "Failed to capture photo");

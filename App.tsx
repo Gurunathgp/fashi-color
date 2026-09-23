@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, Image, ActivityIndicator, Alert } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, Image, ActivityIndicator, Alert, Platform } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
 // expo-file-system 57 moved the classic API: on the default entry `readAsStringAsync` /
@@ -80,7 +80,7 @@ export default function App() {
   // in memory. Delete the previous cache file before each new capture so no photo
   // accumulates — only derived numbers are persisted via saveProfile().
   const deleteCacheFile = useCallback(async (uri: string | null) => {
-    if (!uri || uri.startsWith("data:")) return;
+    if (!uri || uri.startsWith("data:") || uri.startsWith("blob:") || Platform.OS === "web") return;
     try {
       await FileSystem.deleteAsync(uri, { idempotent: true });
     } catch {
@@ -107,12 +107,21 @@ export default function App() {
   }, [naturalHair]);
 
   const analyse = useCallback(
-    async (uri: string) => {
+    async (uri: string, assetBase64?: string | null) => {
       setBusy(true);
       setError(null);
       try {
-        const base64 = await FileSystem.readAsStringAsync(uri, { encoding: "base64" });
-        const bytes = new Uint8Array(Buffer.from(base64, "base64"));
+        let bytes: Uint8Array;
+        if (assetBase64) {
+          bytes = new Uint8Array(Buffer.from(assetBase64, "base64"));
+        } else if (Platform.OS === "web" || uri.startsWith("data:") || uri.startsWith("blob:")) {
+          const resp = await fetch(uri);
+          const arrayBuf = await resp.arrayBuffer();
+          bytes = new Uint8Array(arrayBuf);
+        } else {
+          const base64 = await FileSystem.readAsStringAsync(uri, { encoding: "base64" });
+          bytes = new Uint8Array(Buffer.from(base64, "base64"));
+        }
         const buf = decodeJpegToBuffer(bytes);
         setImageBuffer(buf);
         const r = analyseBuffer(buf, { trend, naturalHair: naturalHair ?? true });
@@ -136,11 +145,15 @@ export default function App() {
       Alert.alert("Photo access needed", "Fashi reads the photo on-device and never uploads it.");
       return;
     }
-    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 1 });
+    const res = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      quality: 1,
+      base64: true,
+    });
     if (res.canceled || !res.assets?.[0]) return;
     await deleteCacheFile(imageUri);
     setImageUri(res.assets[0].uri);
-    await analyse(res.assets[0].uri);
+    await analyse(res.assets[0].uri, res.assets[0].base64);
   }, [analyse, deleteCacheFile, imageUri, requireHairAnswer]);
 
   const takePhoto = useCallback(() => {
@@ -574,7 +587,7 @@ function Back({ onPress, label }: { onPress: () => void; label: string }) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#FFF", paddingTop: 44 },
+  root: { flex: 1, backgroundColor: "#FFF", paddingTop: 44, maxWidth: 640, width: "100%", alignSelf: "center" },
   home: { padding: 16, gap: 12, paddingBottom: 40 },
   h1: { fontSize: 30, fontWeight: "800", color: "#111" },
   h2: { fontSize: 15, fontWeight: "600", color: "#333" },
