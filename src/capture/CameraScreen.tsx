@@ -19,10 +19,11 @@ import {
   StyleSheet,
   Pressable,
   ActivityIndicator,
-  Alert,
   Dimensions,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
+// react-native-web's Alert is a no-op; the shared dialog seam keeps the error visible on web too.
+import { notify } from "../ui/dialog";
 import type { LockReport, NativeCameraHandle } from "./nativeCamera";
 
 let nativeModule: typeof import("./nativeCamera") | null = null;
@@ -98,7 +99,7 @@ export function CameraScreen({ onCapture, onCancel }: Props) {
       const res = await ImagePicker.launchCameraAsync({ quality: 1, base64: true });
       if (!res.canceled && res.assets?.[0]?.uri) onCapture(res.assets[0].uri);
     } catch (e) {
-      Alert.alert("Camera Error", e instanceof Error ? e.message : "Failed to capture photo");
+      notify("Camera Error", e instanceof Error ? e.message : "Failed to capture photo");
     } finally {
       setBusy(false);
     }

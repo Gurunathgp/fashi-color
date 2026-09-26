@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, Image, ActivityIndicator, Alert, Platform } from "react-native";
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Pressable,
+  Image,
+  ActivityIndicator,
+  Platform,
+  useWindowDimensions,
+  type GestureResponderEvent,
+} from "react-native";
 import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
 // expo-file-system 57 moved the classic API: on the default entry `readAsStringAsync` /
@@ -44,8 +55,14 @@ import {
   resultFromStoredProfile,
   type StoredProfile,
 } from "./src/storage/profile";
+// Platform dialogs: react-native-web's Alert is a no-op, so `Alert.alert` silently did nothing in
+// the web export (see src/ui/dialog.ts).
+import { notify, confirm } from "./src/ui/dialog";
+// Manual white-paper reference (plan P1.5): the pipeline has always accepted a rect, the UI that
+// produces one was the missing piece.
+import { rectFromPoint, checkRect, type NormalisedRect } from "./src/capture/whiteRect";
 
-type Screen = "home" | "camera" | "gate" | "result" | "drape";
+type Screen = "home" | "camera" | "gate" | "result" | "drape" | "white";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("home");
@@ -62,6 +79,10 @@ export default function App() {
   const [consent, setConsent] = useState<boolean | null>(null);
   // Plan §10 risk "dyed hair": asked before the first measurement, never assumed.
   const [naturalHair, setNaturalHair] = useState<boolean | null>(null);
+  // Manual white-paper mark (normalised) and the last re-measure report, for the white-ref screen.
+  const [whiteRect, setWhiteRect] = useState<NormalisedRect | null>(null);
+  const [whiteStatus, setWhiteStatus] = useState<string | null>(null);
+  const { width: viewWidth } = useWindowDimensions();
 
   // Refit the trend from any calibration samples already on the device.
   const refitTrend = useCallback(async () => {
@@ -95,19 +116,15 @@ export default function App() {
    */
   const requireHairAnswer = useCallback(() => {
     if (naturalHair !== null) return true;
-    Alert.alert(
+    notify(
       "Is this your natural hair colour?",
-      "Dyed or coloured hair changes the clarity reading, so we ask before measuring. Tap your answer, then start the capture again.",
-      [
-        { text: "It's natural", onPress: () => setNaturalHair(true) },
-        { text: "Dyed / coloured", onPress: () => setNaturalHair(false) },
-      ]
+      "Dyed or coloured hair changes the clarity reading, so answer Natural or Dyed below, then start the capture again."
     );
     return false;
   }, [naturalHair]);
 
   const analyse = useCallback(
-    async (uri: string, assetBase64?: string | null) => {
+    async (uri: string, assetBase64?: string | null, whiteReferenceRect?: NormalisedRect) => {
       setBusy(true);
       setError(null);
       try {
@@ -124,7 +141,7 @@ export default function App() {
         }
         const buf = decodeJpegToBuffer(bytes);
         setImageBuffer(buf);
-        const r = analyseBuffer(buf, { trend, naturalHair: naturalHair ?? true });
+        const r = analyseBuffer(buf, { trend, naturalHair: naturalHair ?? true, whiteReferenceRect });
         setResult(r);
         setAnswers([]);
         setQuizIndex(0);
@@ -142,7 +159,7 @@ export default function App() {
     if (!requireHairAnswer()) return;
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
-      Alert.alert("Photo access needed", "Fashi reads the photo on-device and never uploads it.");
+      notify("Photo access needed", "Fashi reads the photo on-device and never uploads it.");
       return;
     }
     const res = await ImagePicker.launchImageLibraryAsync({
@@ -219,12 +236,12 @@ export default function App() {
 
   const addToCalibration = useCallback(async () => {
     if (!result || !Number.isFinite(result.skinD65.L)) {
-      Alert.alert("Nothing to add", "This capture produced no usable skin measurement.");
+      notify("Nothing to add", "This capture produced no usable skin measurement.");
       return;
     }
     const n = await appendCalibrationSample(result.skinD65, result.hairD65);
     const fitted = await refitTrend();
-    Alert.alert(
+    notify(
       "Added to calibration",
       `${n} subject${n === 1 ? "" : "s"} stored. ${
         fitted >= MIN_CALIBRATION_N
@@ -233,6 +250,53 @@ export default function App() {
       }`
     );
   }, [result, refitTrend]);
+
+  // White-reference screen (plan P1.5): the preview keeps the decoded buffer's aspect ratio, so a
+  // tap maps linearly onto normalised image coordinates.
+  const previewWidth = Math.min(Math.max(220, viewWidth - 64), 360);
+  const previewHeight = imageBuffer
+    ? Math.max(160, Math.round((previewWidth * imageBuffer.height) / imageBuffer.width))
+    : 240;
+
+  const onTapPreview = useCallback(
+    (event: GestureResponderEvent) => {
+      if (!imageBuffer) return;
+      const { locationX, locationY } = event.nativeEvent;
+      setWhiteRect(
+        rectFromPoint(
+          locationX / previewWidth,
+          locationY / previewHeight,
+          imageBuffer.width,
+          imageBuffer.height
+        )
+      );
+      setWhiteStatus(null);
+    },
+    [imageBuffer, previewWidth, previewHeight]
+  );
+
+  const reanalyseWithWhiteRef = useCallback(() => {
+    if (!imageBuffer || !whiteRect) return;
+    const check = checkRect(whiteRect, imageBuffer.width, imageBuffer.height);
+    if (!check.ok) {
+      setWhiteStatus(check.reason);
+      return;
+    }
+    // Re-runs the whole pipeline (illuminant -> adaptation -> gate -> axes) on the pixels we
+    // already hold in memory: no photo is read from disk or re-uploaded to do this.
+    const r = analyseBuffer(imageBuffer, {
+      trend,
+      naturalHair: naturalHair ?? true,
+      whiteReferenceRect: whiteRect,
+    });
+    setResult(r);
+    setAnswers([]);
+    setQuizIndex(0);
+    setWhiteStatus(
+      `Re-measured: illuminant ${r.illuminant.method} at ${Math.round(r.illuminant.cct)} K ` +
+        `(reliability ${r.illuminant.reliability.toFixed(2)}), gate re-run on the corrected pixels.`
+    );
+  }, [imageBuffer, whiteRect, trend, naturalHair]);
 
   const persist = useCallback(async () => {
     const r = adjustedResult;
@@ -250,7 +314,7 @@ export default function App() {
     await saveProfile(record);
     const loaded = await loadProfile();
     setSavedProfile(loaded);
-    Alert.alert(
+    notify(
       "Saved on device",
       "Only the numbers were stored (axes, Lab, contrast, CCT). Picker cache is deleted; no photo is kept."
     );
@@ -312,7 +376,8 @@ export default function App() {
             Best light: face a window in daylight, no overhead lamp, white or grey top. Holding a
             sheet of white paper beside your neck inserts a white reference that sharply improves
             accuracy (P0.3 verdict pending — synthetic data says drape-only without it). Fashi
-            automatically looks for that white surface in the photo when you hold it up.
+            automatically looks for that white surface in the photo when you hold it up; if it misses
+            it, capture anyway and mark the sheet yourself from the home screen.
           </Text>
 
           <View style={styles.hairBlock}>
@@ -321,6 +386,9 @@ export default function App() {
               <Pressable
                 style={[styles.hairOpt, naturalHair === true && styles.hairOn]}
                 onPress={() => setNaturalHair(true)}
+                accessibilityRole="button"
+                accessibilityState={{ selected: naturalHair === true }}
+                accessibilityLabel="Natural hair colour"
               >
                 <Text style={[styles.hairText, naturalHair === true && styles.hairTextOn]}>
                   Natural
@@ -329,6 +397,9 @@ export default function App() {
               <Pressable
                 style={[styles.hairOpt, naturalHair === false && styles.hairOn]}
                 onPress={() => setNaturalHair(false)}
+                accessibilityRole="button"
+                accessibilityState={{ selected: naturalHair === false }}
+                accessibilityLabel="Dyed or coloured hair"
               >
                 <Text style={[styles.hairText, naturalHair === false && styles.hairTextOn]}>
                   Dyed or coloured
@@ -398,10 +469,22 @@ export default function App() {
             </View>
           )}
 
-          <Pressable style={styles.primary} onPress={takePhoto} disabled={busy}>
+          <Pressable
+            style={styles.primary}
+            onPress={takePhoto}
+            disabled={busy}
+            accessibilityRole="button"
+            accessibilityLabel="Take a photo"
+          >
             <Text style={styles.primaryText}>Take a photo</Text>
           </Pressable>
-          <Pressable style={styles.secondary} onPress={pickPhoto} disabled={busy}>
+          <Pressable
+            style={styles.secondary}
+            onPress={pickPhoto}
+            disabled={busy}
+            accessibilityRole="button"
+            accessibilityLabel="Choose an existing photo"
+          >
             <Text style={styles.secondaryText}>Choose an existing photo</Text>
           </Pressable>
 
@@ -417,16 +500,42 @@ export default function App() {
 
           {result && (
             <View style={styles.jump}>
-              <Pressable style={styles.linkBtn} onPress={() => setScreen("gate")}>
+              <Pressable
+                style={styles.linkBtn}
+                onPress={() => setScreen("gate")}
+                accessibilityRole="button"
+              >
                 <Text style={styles.linkText}>Capture quality report</Text>
               </Pressable>
-              <Pressable style={styles.linkBtn} onPress={() => setScreen("result")}>
+              <Pressable
+                style={styles.linkBtn}
+                onPress={() => setScreen("result")}
+                accessibilityRole="button"
+              >
                 <Text style={styles.linkText}>Measurements and palette</Text>
               </Pressable>
-              <Pressable style={styles.linkBtn} onPress={() => setScreen("drape")}>
+              <Pressable
+                style={styles.linkBtn}
+                onPress={() => setScreen("drape")}
+                accessibilityRole="button"
+              >
                 <Text style={styles.linkText}>Drape A/B quiz</Text>
               </Pressable>
-              <Pressable style={styles.linkBtn} onPress={addToCalibration}>
+              {imageBuffer && (
+                <Pressable
+                  style={styles.linkBtn}
+                  onPress={() => setScreen("white")}
+                  accessibilityRole="button"
+                  accessibilityLabel="Mark white paper and re-measure"
+                >
+                  <Text style={styles.linkText}>Mark white paper and re-measure</Text>
+                </Pressable>
+              )}
+              <Pressable
+                style={styles.linkBtn}
+                onPress={addToCalibration}
+                accessibilityRole="button"
+              >
                 <Text style={styles.linkText}>Add this capture to calibration set</Text>
               </Pressable>
             </View>
@@ -468,26 +577,21 @@ export default function App() {
             )}
             <Pressable
               style={styles.reset}
-              onPress={() =>
-                Alert.alert(
+              accessibilityRole="button"
+              accessibilityLabel="Delete all my data"
+              onPress={async () => {
+                const ok = await confirm(
                   "Delete all stored data?",
                   "Removes saved measurements and calibration samples from this device. Photos are never stored, so there are none to delete.",
-                  [
-                    { text: "Cancel", style: "cancel" },
-                    {
-                      text: "Delete",
-                      style: "destructive",
-                      onPress: async () => {
-                        await clearProfile();
-                        setSavedProfile(null);
-                        await clearCalibration();
-                        await refitTrend();
-                        Alert.alert("Deleted", "All stored numbers were removed from this device.");
-                      },
-                    },
-                  ]
-                )
-              }
+                  { confirmText: "Delete", destructive: true }
+                );
+                if (!ok) return;
+                await clearProfile();
+                setSavedProfile(null);
+                await clearCalibration();
+                await refitTrend();
+                notify("Deleted", "All stored numbers were removed from this device.");
+              }}
             >
               <Text style={styles.resetText}>Delete all my data</Text>
             </Pressable>
@@ -570,6 +674,84 @@ export default function App() {
             </Text>
             <Pressable style={styles.secondary} onPress={() => setScreen("result")}>
               <Text style={styles.secondaryText}>Skip to result</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
+      )}
+
+      {screen === "white" && result && imageBuffer && (
+        <ScrollView>
+          <Back onPress={() => setScreen("home")} label="Home" />
+          <View style={styles.home}>
+            <Text style={styles.h1}>Mark the white paper</Text>
+            <Text style={styles.p}>
+              Tap the sheet of white paper in your photo. That patch is read as the scene illuminant,
+              which is the single largest error term in the measurement: a marked reference outranks
+              both the auto-detected surface and the sclera prior.
+            </Text>
+
+            <View style={styles.notes}>
+              <Text style={styles.notesTitle}>Illuminant currently in use</Text>
+              <Text style={styles.notesBody}>
+                {result.illuminant.method} · {Math.round(result.illuminant.cct)} K · Duv{" "}
+                {result.illuminant.duv.toFixed(3)} · reliability{" "}
+                {result.illuminant.reliability.toFixed(2)}
+              </Text>
+            </View>
+
+            <Pressable
+              onPress={onTapPreview}
+              accessibilityRole="button"
+              accessibilityLabel="Tap the white paper in the photo"
+              style={[styles.tapArea, { width: previewWidth, height: previewHeight }]}
+            >
+              {imageUri ? (
+                <Image
+                  source={{ uri: imageUri }}
+                  style={{ width: previewWidth, height: previewHeight }}
+                  resizeMode="contain"
+                />
+              ) : (
+                <View style={{ width: previewWidth, height: previewHeight }} />
+              )}
+              {whiteRect && (
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.patch,
+                    {
+                      left: whiteRect.x * previewWidth,
+                      top: whiteRect.y * previewHeight,
+                      width: whiteRect.w * previewWidth,
+                      height: whiteRect.h * previewHeight,
+                    },
+                  ]}
+                />
+              )}
+            </Pressable>
+
+            <Text style={styles.caption}>
+              {whiteRect
+                ? checkRect(whiteRect, imageBuffer.width, imageBuffer.height).reason
+                : "No patch marked yet — tap the paper in the photo above."}
+            </Text>
+            {whiteStatus && <Text style={styles.notesBody}>{whiteStatus}</Text>}
+
+            <Pressable
+              style={styles.primary}
+              onPress={reanalyseWithWhiteRef}
+              disabled={!whiteRect}
+              accessibilityRole="button"
+              accessibilityLabel="Re-measure with this white reference"
+            >
+              <Text style={styles.primaryText}>Re-measure with this reference</Text>
+            </Pressable>
+            <Pressable
+              style={styles.secondary}
+              onPress={() => setScreen("home")}
+              accessibilityRole="button"
+            >
+              <Text style={styles.secondaryText}>Back to home</Text>
             </Pressable>
           </View>
         </ScrollView>
@@ -662,4 +844,17 @@ const styles = StyleSheet.create({
   footerBtns: { padding: 16, gap: 10, paddingBottom: 40 },
   caution: { fontSize: 12, color: "#8A5A00", lineHeight: 17 },
   caption: { fontSize: 12, color: "#666", lineHeight: 17 },
+  tapArea: {
+    position: "relative",
+    alignSelf: "center",
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: "#EEE",
+  },
+  patch: {
+    position: "absolute",
+    borderWidth: 2,
+    borderColor: "#0A7A55",
+    backgroundColor: "rgba(10, 122, 85, 0.18)",
+  },
 });

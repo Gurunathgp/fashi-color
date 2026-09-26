@@ -3,11 +3,13 @@
     "name": "Fashi",
     "slug": "fashi-color",
     "version": "1.0.0",
+    "scheme": "fashi",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.fashi.color"
     },
     "android": {
       "adaptiveIcon": {
@@ -17,8 +19,11 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "permissions": ["android.permission.CAMERA"],
-      "package": "com.fashi.color"
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
+      "package": "com.fashi.color",
+      "versionCode": 1
     },
     "plugins": [
       [
@@ -26,10 +31,29 @@
         {
           "photosPermission": "Allow Fashi to pick photo for color analysis."
         }
+      ],
+      "expo-dev-client",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#E6F4FE"
+        }
       ]
     ],
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "output": "single",
+      "name": "Fashi — On-Device Colour Analysis",
+      "shortName": "Fashi",
+      "description": "India-first personal colour analysis that runs entirely on your phone. Your photo never leaves the device.",
+      "themeColor": "#111111",
+      "backgroundColor": "#FFFFFF",
+      "lang": "en",
+      "display": "standalone",
+      "startUrl": "/"
     }
   }
 }

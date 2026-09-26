@@ -8,9 +8,13 @@
 //   - Top 6 curated palette swatches with CVD-safe names, hex codes, and roles
 //   - Privacy verified badge ("100% On-Device · Photo Never Uploaded")
 
-import { View, Text, StyleSheet, Pressable, Share, Modal } from "react-native";
+import { useState } from "react";
+import { View, Text, StyleSheet, Pressable, Modal } from "react-native";
 import type { AnalysisResult } from "../capture/analyze";
 import type { Trend } from "../analysis/axes";
+// Share text is built in one place (src/ui/share.ts) so the wording is unit-tested, and the
+// web path degrades to the clipboard instead of a rejected navigator.share.
+import { buildShareCardText, shareText, describeShareOutcome, SHARE_TITLES } from "./share";
 
 type Props = {
   result: AnalysisResult;
@@ -21,32 +25,16 @@ type Props = {
 
 export function ShareCard({ result, trend, visible, onClose }: Props) {
   const { axes, label, swatches, metal, olive, skinD65, contrast, illuminant } = result;
+  // Outcome of the last share attempt, so the card never claims a share that did not happen.
+  const [shareNote, setShareNote] = useState<string | null>(null);
 
   const triple = label.calibrated ? label.triple : "Measured";
   const toneKorean = label.calibrated ? label.tone.korean : "분석 완료";
   const toneEnglish = label.calibrated ? label.tone.english : "Tone Measured";
 
   const handleShare = async () => {
-    const topColours = swatches
-      .slice(0, 6)
-      .map((s) => `${s.name} (${s.hex})`)
-      .join("\n• ");
-
-    const shareText =
-      `✦ FASHI Personal Colour Card ✦\n` +
-      `Colouring: ${triple}\n` +
-      `Tone: ${toneKorean} (${toneEnglish})\n` +
-      `Jewellery: ${metal === "gold" ? "Gold" : metal === "silver" ? "Silver" : "Gold & Silver"}${olive ? " · Olive/Neutral" : ""}\n\n` +
-      `Best Palette:\n• ${topColours}\n\n` +
-      `Skin Lab: ${skinD65.L.toFixed(1)}, ${skinD65.a.toFixed(1)}, ${skinD65.b.toFixed(1)}\n` +
-      `Contrast: ${contrast.toFixed(1)} ΔL*\n\n` +
-      `Analyzed 100% on-device. No photo was stored or uploaded.`;
-
-    try {
-      await Share.share({ message: shareText });
-    } catch {
-      // User dismissed share dialog
-    }
+    const outcome = await shareText(SHARE_TITLES.card, buildShareCardText(result));
+    setShareNote(describeShareOutcome(outcome));
   };
 
   return (
@@ -125,13 +113,28 @@ export function ShareCard({ result, trend, visible, onClose }: Props) {
 
           {/* Actions */}
           <View style={styles.actionRow}>
-            <Pressable style={styles.shareBtn} onPress={handleShare}>
+            <Pressable
+              style={styles.shareBtn}
+              onPress={handleShare}
+              accessibilityRole="button"
+              accessibilityLabel="Share card"
+            >
               <Text style={styles.shareBtnText}>Share card</Text>
             </Pressable>
-            <Pressable style={styles.closeBtn} onPress={onClose}>
+            <Pressable
+              style={styles.closeBtn}
+              onPress={onClose}
+              accessibilityRole="button"
+              accessibilityLabel="Done"
+            >
               <Text style={styles.closeBtnText}>Done</Text>
             </Pressable>
           </View>
+          {shareNote && (
+            <Text style={styles.shareNote} accessibilityLiveRegion="polite">
+              {shareNote}
+            </Text>
+          )}
         </View>
       </View>
     </Modal>
@@ -346,5 +349,10 @@ const styles = StyleSheet.create({
     color: "#E2E5EB",
     fontSize: 14,
     fontWeight: "700",
+  },
+  shareNote: {
+    fontSize: 12,
+    color: "#9AA4B8",
+    textAlign: "center",
   },
 });

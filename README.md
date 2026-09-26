@@ -24,12 +24,16 @@ npx expo run:android        # dev client: enables the native camera path below
 Verify the tree the way the last review did:
 
 ```bash
+npm run verify              # tsc --noEmit + jest, in one shot
 npx tsc --noEmit            # strict, includes tests — exit 0
-npm test                    # 142 tests / 9 suites, no watch
+npm test                    # 168 tests / 12 suites, no watch
 npx expo config             # must resolve (no PluginError)
 npx expo export --platform android
 npx expo export --platform web
 ```
+
+Both exports write to `dist/`, so the second overwrites the first — add `--output-dir dist-web` if you
+want to keep both side by side.
 
 ---
 
@@ -93,17 +97,47 @@ nothing is locked there.
 - First-run consent screen before any capture; consent stored locally (`fashi.consent.v1`).
 - Photos decode in memory; the picker/camera cache file is deleted after measurement.
 - Stored: axes/Lab/contrast/CCT/quiz answers only (`fashi.profile.v1`, `fashi.calibration.v1`).
-- "Delete all my data" clears profile + calibration.
+- "Delete all my data" clears profile + calibration, behind a confirmation that works on every
+  platform (see *Web parity* below — on web it used to be a button that silently did nothing).
+- Marking white paper re-runs the pipeline on the pixels already held in memory; nothing is read back
+  from disk or uploaded to do it.
+
+---
+
+## Web parity (what the browser build really does)
+
+The web export is how this gets demoed without a phone, and two `react-native-web` stubs used to make
+it lie:
+
+- `Alert.alert()` is an **empty function** in react-native-web, so every dialog in the app silently
+  did nothing on web — including the "Delete all my data" confirmation, whose destructive callback
+  could never run. Everything now goes through `src/ui/dialog.ts` (`notify`, `confirm`), which uses
+  `window.alert` / `window.confirm` on web and `Alert` on native.
+- `Share.share()` **rejects** whenever `navigator.share` is missing (every desktop browser), and the
+  rejection used to be swallowed, so the Share buttons looked dead. `src/ui/share.ts` now tries
+  `navigator.share`, then the clipboard, then says plainly that this browser can do neither — and the
+  UI shows which path was taken. Share wording lives in pure builders (`buildResultShareText`,
+  `buildShareCardText`) so it is unit-tested instead of eyeballed.
+
+Capture on web still falls back to the file picker (a browser cannot lock AE/AWB), but the
+measurement pipeline is the same code on every platform.
 
 ---
 
 ## Status & open work
 
-- ✅ 142 tests / 9 suites green · `tsc` clean · android + web bundles export.
+- ✅ 168 tests / 12 suites green · `tsc` clean · android + web bundles export.
+- ✅ Web export no longer lies about dialogs or sharing (see *Web parity*): `src/ui/dialog.ts` and
+  `src/ui/share.ts` replace the react-native-web stubs, with `__tests__/dialog.test.ts` and
+  `__tests__/share.test.ts` pinning the behaviour on both platforms.
+- ✅ Manual white-paper marking is wired end to end (P1.5): tap the sheet in the photo on the
+  "Mark white paper" screen and the pipeline re-runs with that rect, which outranks the
+  auto-detected surface and the sclera prior (`src/capture/whiteRect.ts`, `whiteRect.test.ts`).
 - ❌ No P0.5 calibration captures yet — tone labels refuse until 15+ real captures exist.
 - ❌ `faceLandmarker.ts` / `segmentation.ts` are pixel heuristics, not the TFLite models.
-- ❌ Native camera path type-checked and bundled but not yet run on a device.
-- ❌ Share card exports text only (no image render).
+- ❌ Native camera path type-checked and bundled but not yet run on a device (the splash screen,
+  dev-client plugin and `versionCode` in `app.json` are in place for that first `run:android`).
+- ❌ Share card is still text-only — no image render (needs a native screenshot module).
 
 See the workspace `README.md` (§15–§17) for the verification log, the full check-by-check gate
 table, and the spec-to-code cross-reference.

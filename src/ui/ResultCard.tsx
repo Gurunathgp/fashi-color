@@ -1,8 +1,11 @@
 import { useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, Share } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable } from "react-native";
 import type { AnalysisResult } from "../capture/analyze";
 import type { Trend } from "../analysis/axes";
 import { ShareCard } from "./ShareCard";
+// Same share plumbing as the visual card: text is built once, and the web path copies to the
+// clipboard instead of failing silently.
+import { buildResultShareText, shareText, describeShareOutcome, SHARE_TITLES } from "./share";
 
 type Props = {
   result: AnalysisResult;
@@ -23,6 +26,7 @@ type Props = {
  */
 export function ResultCard({ result, trend }: Props) {
   const [showShareCard, setShowShareCard] = useState(false);
+  const [shareNote, setShareNote] = useState<string | null>(null);
   const { axes, confidence, label, swatches, metal, olive, skinD65, hairD65, illuminant, contrast } = result;
 
   return (
@@ -118,27 +122,21 @@ export function ResultCard({ result, trend }: Props) {
 
         <Pressable
           style={styles.shareBtn}
-          onPress={() => {
-            const triple = label.calibrated ? label.triple : "Measured (no tone yet)";
-            const tone = label.calibrated ? `${label.tone.korean} · ${label.tone.english}` : "uncalibrated";
-            const top = swatches
-              .slice(0, 6)
-              .map((s) => `${s.name} ${s.hex}`)
-              .join(", ");
-            void Share.share({
-              message:
-                `Fashi colour result (on-device, no photo uploaded)\n` +
-                `${triple} — ${tone}\n` +
-                `Metal: ${metal}${olive ? " · Olive/neutral" : ""}\n` +
-                `Top colours: ${top}\n` +
-                `W ${axes.W.toFixed(2)} D ${axes.D.toFixed(2)} C ${axes.C.toFixed(2)}`,
-            });
+          onPress={async () => {
+            const outcome = await shareText(SHARE_TITLES.result, buildResultShareText(result));
+            setShareNote(describeShareOutcome(outcome));
           }}
           accessibilityRole="button"
         >
           <Text style={styles.shareText}>Share text</Text>
         </Pressable>
       </View>
+
+      {shareNote && (
+        <Text style={styles.caption} accessibilityLiveRegion="polite">
+          {shareNote}
+        </Text>
+      )}
 
       <ShareCard
         result={result}

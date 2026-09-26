@@ -33,6 +33,18 @@ yarn-error.*
 # local env files
 .env*.local
 
+# MCP local state (knowledge-graph memory)
+.mcp/
+
+# verification scratch written by ad-hoc runs
+jest-out.txt
+jest-err.txt
+tsc-out.txt
+tsc-err.txt
+export-*.txt
+splash-install*.txt
+expo-config-check.json
+
 # typescript
 *.tsbuildinfo
 
